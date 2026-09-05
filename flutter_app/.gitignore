@@ -1,0 +1,15 @@
+# Generated platform scaffolding (recreated by `flutter create` / CI)
+android/
+ios/
+linux/
+macos/
+web/
+windows/
+
+# Dart / Flutter build output
+.dart_tool/
+.packages
+.flutter-plugins
+.flutter-plugins-dependencies
+build/
+pubspec.lock
