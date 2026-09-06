@@ -3,12 +3,16 @@ import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
 
 import '../app_state.dart';
+import '../models.dart';
 import '../theme.dart';
 import '../widgets/common.dart';
 
 class HomeScreen extends StatelessWidget {
   const HomeScreen({super.key, required this.onGoConnect});
-  final VoidCallback onGoConnect;
+
+  /// Navigates to Connect. When [device] is provided (quick-send tap), the
+  /// Connect screen preselects it instead of showing an empty device list.
+  final void Function([Device? device]) onGoConnect;
 
   @override
   Widget build(BuildContext context) {
@@ -126,6 +130,10 @@ class HomeScreen extends StatelessWidget {
           ),
         ),
         const SizedBox(height: 16),
+        if (state.recentOnlineDevices.isNotEmpty) ...[
+          HDFadeIn(delayMs: 40, child: _quickSendRow(context, state)),
+          const SizedBox(height: 16),
+        ],
         HDFadeIn(
           delayMs: 60,
           child: wide
@@ -143,7 +151,90 @@ class HomeScreen extends StatelessWidget {
                   _sendPanel(context),
                 ]),
         ),
+        if (state.totalSentBytes > 0 || state.totalReceivedBytes > 0) ...[
+          const SizedBox(height: 16),
+          HDFadeIn(
+            delayMs: 90,
+            child: wide
+                ? Row(children: [
+                    Expanded(
+                        child: HDStatTile(
+                            icon: Icons.north_east_rounded,
+                            label: 'Total sent',
+                            value: formatBytes(state.totalSentBytes),
+                            color: HDColors.primary)),
+                    const SizedBox(width: 16),
+                    Expanded(
+                        child: HDStatTile(
+                            icon: Icons.south_west_rounded,
+                            label: 'Total received',
+                            value: formatBytes(state.totalReceivedBytes),
+                            color: HDColors.accent)),
+                  ])
+                : Row(children: [
+                    Expanded(
+                        child: HDStatTile(
+                            icon: Icons.north_east_rounded,
+                            label: 'Total sent',
+                            value: formatBytes(state.totalSentBytes),
+                            color: HDColors.primary)),
+                    const SizedBox(width: 12),
+                    Expanded(
+                        child: HDStatTile(
+                            icon: Icons.south_west_rounded,
+                            label: 'Total received',
+                            value: formatBytes(state.totalReceivedBytes),
+                            color: HDColors.accent)),
+                  ]),
+          ),
+        ],
       ],
+    );
+  }
+
+  Widget _quickSendRow(BuildContext context, AppState state) {
+    return HDPanel(
+      padding: const EdgeInsets.fromLTRB(16, 14, 16, 14),
+      child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+        const SectionTitle('Quick send', icon: Icons.bolt_rounded),
+        SizedBox(
+          height: 76,
+          child: ListView.separated(
+            scrollDirection: Axis.horizontal,
+            itemCount: state.recentOnlineDevices.length,
+            separatorBuilder: (_, __) => const SizedBox(width: 10),
+            itemBuilder: (context, i) {
+              final d = state.recentOnlineDevices[i];
+              return InkWell(
+                borderRadius: BorderRadius.circular(14),
+                onTap: () => onGoConnect(d),
+                child: Container(
+                  width: 92,
+                  padding: const EdgeInsets.symmetric(vertical: 10, horizontal: 8),
+                  decoration: BoxDecoration(
+                    color: Theme.of(context).inputDecorationTheme.fillColor,
+                    borderRadius: BorderRadius.circular(14),
+                    border: Border.all(
+                        color:
+                            Theme.of(context).brightness == Brightness.dark
+                                ? HDColors.darkBorder
+                                : HDColors.lightBorder),
+                  ),
+                  child: Column(mainAxisAlignment: MainAxisAlignment.center, children: [
+                    HDIconBadge(icon: iconForKind(d.kind), size: 34, iconSize: 17),
+                    const SizedBox(height: 6),
+                    Text(d.name,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        textAlign: TextAlign.center,
+                        style: const TextStyle(fontSize: 11.5, fontWeight: FontWeight.w600)),
+                  ]),
+                ),
+              );
+            },
+          ),
+        ),
+      ]),
     );
   }
 
@@ -171,7 +262,7 @@ class HomeScreen extends StatelessWidget {
         ),
         const SizedBox(height: 16),
         FilledButton.icon(
-          onPressed: onGoConnect,
+          onPressed: () => onGoConnect(),
           icon: const Icon(Icons.bolt_rounded, size: 18),
           label: const Text('Send files to a device'),
         ),

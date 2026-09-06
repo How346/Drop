@@ -22,6 +22,7 @@ class AppShell extends StatefulWidget {
 class _AppShellState extends State<AppShell> {
   int _index = 0;
   bool _wired = false;
+  Device? _quickSendTarget;
 
   static const _destinations = [
     (icon: Icons.home_outlined, selected: Icons.home_rounded, label: 'Home'),
@@ -39,6 +40,7 @@ class _AppShellState extends State<AppShell> {
     if (state.ready && !_wired) {
       _wired = true;
       state.incomingPrompt = _promptIncoming;
+      state.onFileReceived = _onFileReceived;
     }
 
     if (!state.ready) {
@@ -59,8 +61,16 @@ class _AppShellState extends State<AppShell> {
     }
 
     final pages = [
-      HomeScreen(onGoConnect: () => setState(() => _index = 1)),
-      ConnectScreen(onConnected: () => setState(() => _index = 2)),
+      HomeScreen(
+        onGoConnect: ([device]) => setState(() {
+          _quickSendTarget = device;
+          _index = 1;
+        }),
+      ),
+      ConnectScreen(
+        initialDevice: _quickSendTarget,
+        onConnected: () => setState(() => _index = 2),
+      ),
       const TransferScreen(),
       const HistoryScreen(),
       const DevicesScreen(),
@@ -167,8 +177,25 @@ class _AppShellState extends State<AppShell> {
     );
   }
 
-  Future<bool> _promptIncoming(String deviceName, List<FileEntry> files) async {
-    final total = files.fold<int>(0, (a, f) => a + f.size);
+  void _onFileReceived(HistoryEntry entry) {
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+      content: Row(children: [
+        const Icon(Icons.check_circle_rounded, color: HDColors.successBright, size: 18),
+        const SizedBox(width: 10),
+        Expanded(
+          child: Text('Received "${entry.fileName}" from ${entry.deviceName}',
+              overflow: TextOverflow.ellipsis),
+        ),
+      ]),
+      action: SnackBarAction(
+        label: 'View',
+        onPressed: () => setState(() => _index = 3),
+      ),
+    ));
+  }
+
+  Future<bool> _promptIncoming(String deviceName, List<FileEntry> files) async {    final total = files.fold<int>(0, (a, f) => a + f.size);
     final result = await showDialog<bool>(
       context: context,
       barrierDismissible: false,

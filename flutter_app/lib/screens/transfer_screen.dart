@@ -61,6 +61,30 @@ class TransferScreen extends StatelessWidget {
     state.addFiles(entries);
   }
 
+  static bool _isImage(String name) {
+    final ext = p.extension(name).toLowerCase().replaceFirst('.', '');
+    return const {'png', 'jpg', 'jpeg', 'gif', 'webp', 'bmp'}.contains(ext);
+  }
+
+  Widget _thumb(FileEntry f) {
+    if (_isImage(f.name)) {
+      final file = File(f.path);
+      return ClipRRect(
+        borderRadius: BorderRadius.circular(10),
+        child: SizedBox(
+          width: 36,
+          height: 36,
+          child: Image.file(
+            file,
+            fit: BoxFit.cover,
+            errorBuilder: (_, __, ___) => HDIconBadge(icon: _iconForFile(f.name), size: 36, iconSize: 18),
+          ),
+        ),
+      );
+    }
+    return HDIconBadge(icon: _iconForFile(f.name), size: 36, iconSize: 18);
+  }
+
   @override
   Widget build(BuildContext context) {
     final state = context.watch<AppState>();
@@ -105,7 +129,7 @@ class TransferScreen extends StatelessWidget {
             ...state.outbox.map((f) => Padding(
                   padding: const EdgeInsets.symmetric(vertical: 5),
                   child: Row(children: [
-                    HDIconBadge(icon: _iconForFile(f.name), size: 36, iconSize: 18),
+                    _thumb(f),
                     const SizedBox(width: 12),
                     Expanded(
                       child: Column(
@@ -144,7 +168,14 @@ class TransferScreen extends StatelessWidget {
     ];
 
     if (active != null) {
-      content.add(HDFadeIn(child: _ActiveTransferCard(active: active, onCancel: state.cancelTransfer)));
+      content.add(HDFadeIn(
+        child: _ActiveTransferCard(
+          active: active,
+          onCancel: state.cancelTransfer,
+          onPause: state.pauseTransfer,
+          onResume: state.resumeTransfer,
+        ),
+      ));
       content.add(const SizedBox(height: 16));
     }
 
@@ -158,17 +189,27 @@ class TransferScreen extends StatelessWidget {
 }
 
 class _ActiveTransferCard extends StatelessWidget {
-  const _ActiveTransferCard({required this.active, required this.onCancel});
+  const _ActiveTransferCard({
+    required this.active,
+    required this.onCancel,
+    required this.onPause,
+    required this.onResume,
+  });
   final TransferProgress active;
   final VoidCallback onCancel;
+  final VoidCallback onPause;
+  final VoidCallback onResume;
 
   @override
   Widget build(BuildContext context) {
     final sending = active.direction == TransferDirection.send;
+    final paused = active.state == TransferState.paused;
+    final running = active.state == TransferState.running || paused;
     final color = switch (active.state) {
       TransferState.completed => HDColors.success,
       TransferState.failed => HDColors.danger,
       TransferState.cancelled => HDColors.warning,
+      TransferState.paused => HDColors.warning,
       _ => HDColors.primary,
     };
 
@@ -208,6 +249,10 @@ class _ActiveTransferCard extends StatelessWidget {
             ),
           ),
         ),
+        if (active.speedHistory.length > 2 && active.state != TransferState.completed) ...[
+          const SizedBox(height: 14),
+          Sparkline(values: active.speedHistory, color: color, height: 36),
+        ],
         const SizedBox(height: 12),
         Wrap(
           spacing: 16,
@@ -219,7 +264,7 @@ class _ActiveTransferCard extends StatelessWidget {
               Row(mainAxisSize: MainAxisSize.min, children: [
                 Icon(Icons.speed_rounded, size: 14, color: Theme.of(context).colorScheme.outline),
                 const SizedBox(width: 4),
-                Text(formatSpeed(active.bytesPerSecond),
+                Text('${formatSpeed(active.bytesPerSecond)} · ${formatBitrate(active.bytesPerSecond)}',
                     style: Theme.of(context).textTheme.bodySmall),
               ]),
               Row(mainAxisSize: MainAxisSize.min, children: [
@@ -229,6 +274,12 @@ class _ActiveTransferCard extends StatelessWidget {
                     style: Theme.of(context).textTheme.bodySmall),
               ]),
             ],
+            if (paused)
+              Row(mainAxisSize: MainAxisSize.min, children: [
+                Icon(Icons.pause_circle_outline_rounded, size: 14, color: color),
+                const SizedBox(width: 4),
+                Text('Paused', style: TextStyle(color: color, fontWeight: FontWeight.w600)),
+              ]),
           ],
         ),
         if (active.fileCount > 1) ...[
@@ -244,13 +295,27 @@ class _ActiveTransferCard extends StatelessWidget {
             Expanded(child: Text(active.error!, style: const TextStyle(color: HDColors.danger))),
           ]),
         ],
-        if (active.state == TransferState.running) ...[
+        if (running) ...[
           const SizedBox(height: 16),
-          OutlinedButton.icon(
-            onPressed: onCancel,
-            icon: const Icon(Icons.close_rounded, size: 18),
-            label: const Text('Cancel transfer'),
-          ),
+          Row(children: [
+            if (sending) ...[
+              Expanded(
+                child: OutlinedButton.icon(
+                  onPressed: paused ? onResume : onPause,
+                  icon: Icon(paused ? Icons.play_arrow_rounded : Icons.pause_rounded, size: 18),
+                  label: Text(paused ? 'Resume' : 'Pause'),
+                ),
+              ),
+              const SizedBox(width: 12),
+            ],
+            Expanded(
+              child: OutlinedButton.icon(
+                onPressed: onCancel,
+                icon: const Icon(Icons.close_rounded, size: 18),
+                label: const Text('Cancel'),
+              ),
+            ),
+          ]),
         ],
       ]),
     );

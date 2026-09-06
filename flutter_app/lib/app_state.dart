@@ -49,6 +49,9 @@ class AppState extends ChangeNotifier {
   /// Presented when a peer requests to send us files.
   Future<bool> Function(String deviceName, List<FileEntry> files)? incomingPrompt;
 
+  /// Fired once per completed inbound transfer so the UI can show a toast.
+  void Function(HistoryEntry entry)? onFileReceived;
+
   Future<void> init() async {
     final prefs = await SharedPreferences.getInstance();
     selfId = prefs.getString('selfId') ??
@@ -57,9 +60,11 @@ class AppState extends ChangeNotifier {
     selfName = prefs.getString('selfName') ?? _defaultName();
     discoverable = prefs.getBool('discoverable') ?? true;
     autoAcceptTrusted = prefs.getBool('autoAcceptTrusted') ?? false;
-    themeMode = (prefs.getString('themeMode') ?? 'dark') == 'light'
-        ? ThemeMode.light
-        : ThemeMode.dark;
+    themeMode = switch (prefs.getString('themeMode')) {
+      'light' => ThemeMode.light,
+      'system' => ThemeMode.system,
+      _ => ThemeMode.dark,
+    };
 
     saveDirectory = prefs.getString('saveDirectory') ?? await _defaultSaveDir();
     await Directory(saveDirectory).create(recursive: true);
@@ -127,6 +132,9 @@ class AppState extends ChangeNotifier {
     transfer.completed.listen((entry) {
       history = [entry, ...history].take(200).toList();
       _persistHistory();
+      if (entry.direction == TransferDirection.receive && entry.status == 'completed') {
+        onFileReceived?.call(entry);
+      }
       notifyListeners();
     });
 
@@ -175,7 +183,12 @@ class AppState extends ChangeNotifier {
 
   Future<void> setThemeMode(ThemeMode mode) async {
     themeMode = mode;
-    await _prefs((p) => p.setString('themeMode', mode == ThemeMode.light ? 'light' : 'dark'));
+    final value = switch (mode) {
+      ThemeMode.light => 'light',
+      ThemeMode.system => 'system',
+      ThemeMode.dark => 'dark',
+    };
+    await _prefs((p) => p.setString('themeMode', value));
     notifyListeners();
   }
 
@@ -293,6 +306,38 @@ class AppState extends ChangeNotifier {
   }
 
   void cancelTransfer() => transfer.cancel();
+
+  bool get isTransferPaused => active?.state == TransferState.paused;
+
+  void pauseTransfer() => transfer.pause();
+
+  void resumeTransfer() => transfer.resume();
+
+  // -------------------------------------------------------------- shortcuts
+
+  /// Devices that are both known and currently online, most recently seen
+  /// first — powers the "quick send" row on Home.
+  List<Device> get recentOnlineDevices {
+    final onlineIds = peers.map((p) => p.id).toSet();
+    final list = knownDevices.values
+        .where((d) => onlineIds.contains(d.id) && !d.blocked)
+        .toList()
+      ..sort((a, b) {
+        final at = a.lastSeen ?? DateTime.fromMillisecondsSinceEpoch(0);
+        final bt = b.lastSeen ?? DateTime.fromMillisecondsSinceEpoch(0);
+        return bt.compareTo(at);
+      });
+    return list.take(4).toList();
+  }
+
+  /// All-time totals across completed transfers, for the Home stats strip.
+  int get totalSentBytes => history
+      .where((h) => h.direction == TransferDirection.send && h.status == 'completed')
+      .fold(0, (a, h) => a + h.bytes);
+
+  int get totalReceivedBytes => history
+      .where((h) => h.direction == TransferDirection.receive && h.status == 'completed')
+      .fold(0, (a, h) => a + h.bytes);
 
   @override
   void dispose() {

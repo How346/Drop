@@ -10,8 +10,9 @@ import '../widgets/common.dart';
 
 /// Pick a peer on the LAN and enter its six-digit code.
 class ConnectScreen extends StatefulWidget {
-  const ConnectScreen({super.key, required this.onConnected});
+  const ConnectScreen({super.key, required this.onConnected, this.initialDevice});
   final VoidCallback onConnected;
+  final Device? initialDevice;
 
   @override
   State<ConnectScreen> createState() => _ConnectScreenState();
@@ -22,6 +23,23 @@ class _ConnectScreenState extends State<ConnectScreen> {
   Device? _selected;
   bool _sending = false;
   String? _error;
+
+  @override
+  void initState() {
+    super.initState();
+    _selected = widget.initialDevice;
+  }
+
+  @override
+  void didUpdateWidget(covariant ConnectScreen oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (widget.initialDevice != null && widget.initialDevice!.id != oldWidget.initialDevice?.id) {
+      setState(() {
+        _selected = widget.initialDevice;
+        _code = '';
+      });
+    }
+  }
 
   void _tap(String digit) {
     if (_code.length >= 6) return;

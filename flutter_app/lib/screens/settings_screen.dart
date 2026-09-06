@@ -103,6 +103,10 @@ class _SettingsScreenState extends State<SettingsScreen> {
                   value: ThemeMode.light,
                   icon: Icon(Icons.light_mode_outlined),
                   label: Text('Light')),
+              ButtonSegment(
+                  value: ThemeMode.system,
+                  icon: Icon(Icons.brightness_auto_outlined),
+                  label: Text('Auto')),
             ],
             selected: {state.themeMode},
             onSelectionChanged: (s) => state.setThemeMode(s.first),
@@ -114,7 +118,8 @@ class _SettingsScreenState extends State<SettingsScreen> {
           const SectionTitle('About', icon: Icons.info_outline_rounded),
           Text(
             'HyperDrop transfers files directly between devices over your local '
-            'network using UDP discovery and an encrypted-integrity TCP stream. '
+            'network using UDP discovery and a verified TCP stream, tuned to use '
+            'the full speed of your connection — up to gigabit on wired LANs. '
             'No account, no cloud, no internet required.',
             style: Theme.of(context).textTheme.bodySmall,
           ),

@@ -1,3 +1,5 @@
+import 'dart:math';
+
 import 'package:flutter/material.dart';
 
 import '../models.dart';
@@ -262,6 +264,120 @@ class HDFadeIn extends StatelessWidget {
         );
       },
       child: child,
+    );
+  }
+}
+
+/// A minimal live throughput chart — deliberately dependency-free. Draws a
+/// smoothed line through recent speed samples so a transfer's live rate
+/// feels tangible, not just a number that jumps around.
+class Sparkline extends StatelessWidget {
+  const Sparkline({super.key, required this.values, this.color = HDColors.primary, this.height = 40});
+  final List<double> values;
+  final Color color;
+  final double height;
+
+  @override
+  Widget build(BuildContext context) {
+    return SizedBox(
+      height: height,
+      width: double.infinity,
+      child: CustomPaint(
+        painter: _SparklinePainter(values: values, color: color),
+      ),
+    );
+  }
+}
+
+class _SparklinePainter extends CustomPainter {
+  _SparklinePainter({required this.values, required this.color});
+  final List<double> values;
+  final Color color;
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    if (values.length < 2) return;
+    final maxV = values.reduce(max) * 1.15 + 1;
+    final stepX = size.width / (values.length - 1);
+
+    Offset pointAt(int i) {
+      final x = i * stepX;
+      final y = size.height - (values[i] / maxV) * size.height;
+      return Offset(x, y.clamp(0, size.height));
+    }
+
+    final line = Path()..moveTo(pointAt(0).dx, pointAt(0).dy);
+    for (var i = 1; i < values.length; i++) {
+      final p0 = pointAt(i - 1);
+      final p1 = pointAt(i);
+      final mid = Offset((p0.dx + p1.dx) / 2, (p0.dy + p1.dy) / 2);
+      line.quadraticBezierTo(p0.dx, p0.dy, mid.dx, mid.dy);
+    }
+    line.lineTo(pointAt(values.length - 1).dx, pointAt(values.length - 1).dy);
+
+    final fill = Path.from(line)
+      ..lineTo(size.width, size.height)
+      ..lineTo(0, size.height)
+      ..close();
+
+    canvas.drawPath(
+      fill,
+      Paint()
+        ..shader = LinearGradient(
+          begin: Alignment.topCenter,
+          end: Alignment.bottomCenter,
+          colors: [color.withOpacity(0.28), color.withOpacity(0.0)],
+        ).createShader(Rect.fromLTWH(0, 0, size.width, size.height)),
+    );
+    canvas.drawPath(
+      line,
+      Paint()
+        ..color = color
+        ..style = PaintingStyle.stroke
+        ..strokeWidth = 2.2
+        ..strokeCap = StrokeCap.round,
+    );
+  }
+
+  @override
+  bool shouldRepaint(covariant _SparklinePainter oldDelegate) =>
+      oldDelegate.values.length != values.length ||
+      (values.isNotEmpty && oldDelegate.values.last != values.last);
+}
+
+/// A compact stat card used for lifetime totals (bytes sent/received) and
+/// similar at-a-glance figures.
+class HDStatTile extends StatelessWidget {
+  const HDStatTile({
+    super.key,
+    required this.icon,
+    required this.label,
+    required this.value,
+    this.color = HDColors.primary,
+  });
+
+  final IconData icon;
+  final String label;
+  final String value;
+  final Color color;
+
+  @override
+  Widget build(BuildContext context) {
+    return HDPanel(
+      padding: const EdgeInsets.all(16),
+      child: Row(children: [
+        HDIconBadge(icon: icon, color: color, size: 38, iconSize: 18),
+        const SizedBox(width: 12),
+        Expanded(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(value, style: const TextStyle(fontWeight: FontWeight.w800, fontSize: 17)),
+              Text(label, style: Theme.of(context).textTheme.bodySmall),
+            ],
+          ),
+        ),
+      ]),
     );
   }
 }

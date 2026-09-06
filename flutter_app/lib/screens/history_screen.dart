@@ -6,35 +6,83 @@ import '../models.dart';
 import '../theme.dart';
 import '../widgets/common.dart';
 
-class HistoryScreen extends StatelessWidget {
+class HistoryScreen extends StatefulWidget {
   const HistoryScreen({super.key});
+
+  @override
+  State<HistoryScreen> createState() => _HistoryScreenState();
+}
+
+class _HistoryScreenState extends State<HistoryScreen> {
+  String _query = '';
 
   @override
   Widget build(BuildContext context) {
     final state = context.watch<AppState>();
-    final history = state.history;
+    final all = state.history;
+    final history = _query.trim().isEmpty
+        ? all
+        : all
+            .where((h) =>
+                h.fileName.toLowerCase().contains(_query.toLowerCase()) ||
+                h.deviceName.toLowerCase().contains(_query.toLowerCase()))
+            .toList();
     final wide = MediaQuery.sizeOf(context).width >= 900;
 
     return ListView(padding: EdgeInsets.fromLTRB(20, wide ? 28 : 20, 20, 28), children: [
       HDFadeIn(
         child: Row(children: [
           Expanded(child: Text('History', style: Theme.of(context).textTheme.headlineSmall)),
-          if (history.isNotEmpty)
+          if (all.isNotEmpty)
             TextButton(onPressed: state.clearHistory, child: const Text('Clear')),
         ]),
       ),
       const SizedBox(height: 4),
       Text('Stored on this device only. Nothing is uploaded anywhere.',
           style: Theme.of(context).textTheme.bodyMedium),
+      if (all.isNotEmpty) ...[
+        const SizedBox(height: 16),
+        HDFadeIn(
+          delayMs: 30,
+          child: Row(children: [
+            Expanded(
+                child: HDStatTile(
+                    icon: Icons.north_east_rounded,
+                    label: 'Sent',
+                    value: formatBytes(state.totalSentBytes),
+                    color: HDColors.primary)),
+            const SizedBox(width: 12),
+            Expanded(
+                child: HDStatTile(
+                    icon: Icons.south_west_rounded,
+                    label: 'Received',
+                    value: formatBytes(state.totalReceivedBytes),
+                    color: HDColors.accent)),
+          ]),
+        ),
+        const SizedBox(height: 16),
+        HDFadeIn(
+          delayMs: 45,
+          child: TextField(
+            onChanged: (v) => setState(() => _query = v),
+            decoration: const InputDecoration(
+              prefixIcon: Icon(Icons.search_rounded, size: 20),
+              hintText: 'Search by file name or device',
+            ),
+          ),
+        ),
+      ],
       const SizedBox(height: 20),
       HDFadeIn(
         delayMs: 60,
         child: HDPanel(
           child: history.isEmpty
-              ? const EmptyState(
+              ? EmptyState(
                   icon: Icons.history_rounded,
-                  title: 'No transfers yet',
-                  body: 'Completed and failed transfers will be listed here.',
+                  title: all.isEmpty ? 'No transfers yet' : 'No matches',
+                  body: all.isEmpty
+                      ? 'Completed and failed transfers will be listed here.'
+                      : 'Try a different search term.',
                 )
               : Column(
                   children: [

@@ -112,6 +112,11 @@ class TransferProgress {
   int fileCount;
   String? error;
 
+  /// Rolling window of recent throughput samples (bytes/sec), newest last.
+  /// Used to draw the live speed sparkline — capped to a small size so it
+  /// stays cheap to keep around and cheap to redraw every update.
+  final List<double> speedHistory = [];
+
   double get fraction => totalBytes == 0 ? 0 : (transferredBytes / totalBytes).clamp(0, 1);
 
   Duration get eta {
@@ -187,6 +192,16 @@ String formatBytes(int bytes, {int digits = 2}) {
 
 String formatSpeed(double bytesPerSecond) =>
     '${formatBytes(bytesPerSecond.round(), digits: 1)}/s';
+
+/// Network speed in the units people actually think in for link speed
+/// (Mbps/Gbps), shown alongside the MB/s figure on the transfer screen.
+String formatBitrate(double bytesPerSecond) {
+  final bits = bytesPerSecond * 8;
+  if (bits >= 1000000000) return '${(bits / 1000000000).toStringAsFixed(2)} Gbps';
+  if (bits >= 1000000) return '${(bits / 1000000).toStringAsFixed(0)} Mbps';
+  if (bits >= 1000) return '${(bits / 1000).toStringAsFixed(0)} Kbps';
+  return '${bits.toStringAsFixed(0)} bps';
+}
 
 String formatDuration(Duration d) {
   if (d.inSeconds < 60) return '${d.inSeconds}s';

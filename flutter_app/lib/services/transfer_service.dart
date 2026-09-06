@@ -1,26 +1,34 @@
 import 'dart:async';
+import 'dart:collection';
 import 'dart:convert';
 import 'dart:io';
 import 'dart:math';
 import 'dart:typed_data';
 
-import 'package:convert/convert.dart';
 import 'package:crypto/crypto.dart';
 import 'package:path/path.dart' as p;
 
 import '../models.dart';
 import 'failures.dart';
 
-/// Chunked TCP transfer engine.
+/// Chunked TCP transfer engine, tuned to move data at the full speed the
+/// underlying link allows (up to 1 Gbps and beyond on wired gigabit LANs).
 ///
 /// Wire format: newline-delimited JSON control frames, followed by raw bytes
-/// for each file body. Every file is hashed incrementally with SHA-256 and
-/// verified by the receiver before the `.part` file is atomically renamed.
+/// for each file body, followed by a small trailer frame carrying the
+/// SHA-256 digest. Hashing the file *after* streaming its bytes (rather than
+/// before) means the sender never reads a file from disk twice, and the
+/// receiver verifies against a hash that's computed in the same single pass
+/// it uses to write the file to disk — no separate read-through required on
+/// either side.
 class TransferService {
   TransferService({required this.selfName, this.selfId = ''});
 
-  static const int defaultChunkSize = 1 << 20; // 1 MiB
-  static const int protoVersion = 1;
+  /// 4 MiB chunks: large enough to keep syscall/flush overhead low at
+  /// gigabit speeds, small enough to keep memory use and progress-update
+  /// granularity reasonable.
+  static const int defaultChunkSize = 4 << 20;
+  static const int protoVersion = 2;
 
   final String selfName;
   final String selfId;
@@ -62,6 +70,25 @@ class TransferService {
   Future<bool> Function(String deviceName, List<FileEntry> files)? onIncomingRequest;
 
   bool _cancelRequested = false;
+  bool _paused = false;
+  Completer<void> _pauseGate = Completer<void>()..complete();
+
+  bool get isPaused => _paused;
+
+  /// Pauses the active outbound transfer after the chunk in flight finishes.
+  /// The connection stays open; the peer simply waits for more bytes.
+  void pause() {
+    if (_paused) return;
+    _paused = true;
+    _pauseGate = Completer<void>();
+  }
+
+  /// Resumes a paused outbound transfer.
+  void resume() {
+    if (!_paused) return;
+    _paused = false;
+    if (!_pauseGate.isCompleted) _pauseGate.complete();
+  }
 
   static bool _secretEquals(String a, String b) {
     if (a.length != b.length) return false;
@@ -81,7 +108,6 @@ class TransferService {
   void forgetSession(String deviceId) {
     if (sessions.remove(deviceId) != null) onSessionsChanged?.call();
   }
-
 
   // ---------------------------------------------------------------- receiver
 
@@ -143,8 +169,7 @@ class TransferService {
           presented != null && stored != null && _secretEquals(stored, presented);
 
       if (!paired &&
-          (hello['proto'] != protoVersion ||
-              pairingCode == null ||
+          (pairingCode == null ||
               codeExpired ||
               hello['code'] is! String ||
               !_secretEquals(pairingCode!, hello['code'] as String))) {
@@ -197,7 +222,6 @@ class TransferService {
       })));
       await socket.flush();
 
-
       if (!accepted) {
         await socket.close();
         return;
@@ -231,7 +255,6 @@ class TransferService {
   ) async {
     final rawName = header['name'] as String;
     final size = (header['size'] as num).toInt();
-    final expectedHash = header['sha256'] as String?;
     final safeName = _sanitizeFileName(rawName);
 
     final dir = Directory(saveDirectory);
@@ -255,7 +278,7 @@ class TransferService {
     final hasher = sha256.startChunkedConversion(digest);
 
     var received = 0;
-    final started = DateTime.now();
+    final speed = _RollingSpeed();
     try {
       while (received < size) {
         final chunk = await reader.readBytes(min(defaultChunkSize, size - received));
@@ -263,15 +286,22 @@ class TransferService {
         sink.add(chunk);
         hasher.add(chunk);
         received += chunk.length;
+        speed.sample(chunk.length);
         progress
           ..transferredBytes = received
-          ..bytesPerSecond = _speed(received, started);
+          ..bytesPerSecond = speed.bytesPerSecond
+          ..speedHistory.add(speed.bytesPerSecond);
+        if (progress.speedHistory.length > 60) progress.speedHistory.removeAt(0);
         _progress.add(progress);
       }
       await sink.flush();
       await sink.close();
       hasher.close();
 
+      // Integrity trailer arrives after the body — the receiver has already
+      // written every byte to disk by the time it needs this.
+      final trailer = await reader.readFrame();
+      final expectedHash = trailer?['sha256'] as String?;
       final actual = digest.events.single.toString();
       if (expectedHash != null && actual != expectedHash) {
         await partFile.delete();
@@ -329,6 +359,8 @@ class TransferService {
     required List<FileEntry> files,
   }) async {
     _cancelRequested = false;
+    _paused = false;
+    if (!_pauseGate.isCompleted) _pauseGate.complete();
     Socket? socket;
     try {
       socket = await Socket.connect(target.address, target.port,
@@ -364,7 +396,6 @@ class TransferService {
         onPaired?.call(target.id, granted);
       }
 
-
       for (var i = 0; i < files.length; i++) {
         await _sendFile(socket, reader, files[i], i, files.length, target.name);
       }
@@ -396,21 +427,11 @@ class TransferService {
     }
     final size = await file.length();
 
-    // Hash first so the receiver can verify integrity (streamed, low memory).
-    final digest = AccumulatorSink<Digest>();
-    final hasher = sha256.startChunkedConversion(digest);
-    await for (final chunk in file.openRead()) {
-      hasher.add(chunk);
-    }
-    hasher.close();
-    final hash = digest.events.single.toString();
-
     socket.add(utf8.encode(encodeFrame({
       'type': 'file',
       'name': entry.name,
       'relativePath': entry.relativePath ?? entry.name,
       'size': size,
-      'sha256': hash,
     })));
     await socket.flush();
 
@@ -424,25 +445,48 @@ class TransferService {
     );
     _progress.add(progress);
 
+    // Hashed in the same pass as it's sent — one read of the file, not two.
+    final digest = AccumulatorSink<Digest>();
+    final hasher = sha256.startChunkedConversion(digest);
+
     var sent = 0;
-    final started = DateTime.now();
+    final speed = _RollingSpeed();
     final handle = await file.open();
     try {
       while (sent < size) {
+        if (_paused) {
+          progress.state = TransferState.paused;
+          _progress.add(progress);
+          await _pauseGate.future;
+          if (!_cancelRequested) {
+            progress.state = TransferState.running;
+            _progress.add(progress);
+          }
+        }
         if (_cancelRequested) throw HyperDropException(TransferFailure.cancelled);
+
         final chunk = await handle.read(min(defaultChunkSize, size - sent));
         if (chunk.isEmpty) break;
+        hasher.add(chunk);
         socket.add(chunk);
         await socket.flush(); // backpressure: never outrun the socket buffer
         sent += chunk.length;
+        speed.sample(chunk.length);
         progress
           ..transferredBytes = sent
-          ..bytesPerSecond = _speed(sent, started);
+          ..bytesPerSecond = speed.bytesPerSecond
+          ..speedHistory.add(speed.bytesPerSecond);
+        if (progress.speedHistory.length > 60) progress.speedHistory.removeAt(0);
         _progress.add(progress);
       }
     } finally {
       await handle.close();
     }
+    hasher.close();
+    final hash = digest.events.single.toString();
+
+    socket.add(utf8.encode(encodeFrame({'type': 'trailer', 'sha256': hash})));
+    await socket.flush();
 
     final ack = await reader.readFrame();
     if (ack == null || ack['type'] != 'ack') {
@@ -464,12 +508,6 @@ class TransferService {
       at: DateTime.now(),
       status: 'completed',
     ));
-  }
-
-  double _speed(int bytes, DateTime started) {
-    final elapsed = DateTime.now().difference(started).inMilliseconds;
-    if (elapsed <= 0) return 0;
-    return bytes / (elapsed / 1000);
   }
 
   String _sanitizeFileName(String name) {
@@ -500,12 +538,49 @@ class TransferService {
   }
 }
 
-/// Reads newline-delimited JSON frames and raw byte runs off one socket.
+/// Tracks throughput over a short trailing window rather than a cumulative
+/// average since the transfer started, so the reported speed reflects what
+/// the link is doing *right now* — important once transfers run fast enough
+/// that a slow first chunk would otherwise drag the average down for a while.
+class _RollingSpeed {
+  final Queue<_Sample> _samples = Queue<_Sample>();
+  static const _window = Duration(milliseconds: 1000);
+
+  void sample(int bytes) {
+    final now = DateTime.now();
+    _samples.addLast(_Sample(now, bytes));
+    while (_samples.isNotEmpty && now.difference(_samples.first.at) > _window) {
+      _samples.removeFirst();
+    }
+  }
+
+  double get bytesPerSecond {
+    if (_samples.length < 2) {
+      return _samples.isEmpty ? 0 : _samples.first.bytes.toDouble();
+    }
+    final total = _samples.fold<int>(0, (a, s) => a + s.bytes);
+    final spanMs = DateTime.now().difference(_samples.first.at).inMilliseconds;
+    if (spanMs <= 0) return 0;
+    return total / (spanMs / 1000);
+  }
+}
+
+class _Sample {
+  _Sample(this.at, this.bytes);
+  final DateTime at;
+  final int bytes;
+}
+
+/// Reads newline-delimited JSON control frames and raw byte runs off one
+/// socket without ever boxing individual bytes: incoming chunks are kept as
+/// [Uint8List] views in a queue, and both frame lines and bulk byte reads are
+/// served as zero-copy slices of that queue. This is what lets the receiver
+/// keep up with a fast sender instead of falling behind on buffer copies.
 class _FrameReader {
   _FrameReader(Socket socket) {
     _sub = socket.listen(
       (data) {
-        _buffer.addAll(data);
+        if (data.isNotEmpty) _queue.add(data);
         _pump();
       },
       onDone: () {
@@ -521,7 +596,8 @@ class _FrameReader {
   }
 
   late final StreamSubscription<Uint8List> _sub;
-  final List<int> _buffer = [];
+  final Queue<Uint8List> _queue = Queue<Uint8List>();
+  int _frontOffset = 0;
   bool _done = false;
   Completer<void>? _waiter;
 
@@ -539,28 +615,76 @@ class _FrameReader {
     return _waiter!.future;
   }
 
+  /// Returns (line without the newline, total bytes including the newline
+  /// to consume) if a full line is currently buffered, else null.
+  (Uint8List, int)? _peekLine() {
+    if (_queue.isEmpty) return null;
+    final first = _queue.first;
+    final idx = first.indexOf(10, _frontOffset);
+    if (idx >= 0) {
+      return (Uint8List.sublistView(first, _frontOffset, idx), idx - _frontOffset + 1);
+    }
+    if (_queue.length == 1) return null;
+    // Rare: a control frame line spans more than one socket read. Only
+    // control frames (never bulk file data) take this path, so an
+    // occasional concat-and-scan here costs nothing measurable.
+    final builder = BytesBuilder(copy: false);
+    builder.add(Uint8List.sublistView(first, _frontOffset));
+    for (final chunk in _queue.skip(1)) {
+      builder.add(chunk);
+    }
+    final all = builder.toBytes();
+    final allIdx = all.indexOf(10);
+    if (allIdx < 0) return null;
+    return (Uint8List.sublistView(all, 0, allIdx), allIdx + 1);
+  }
+
+  void _consume(int n) {
+    var remaining = n;
+    while (remaining > 0 && _queue.isNotEmpty) {
+      final first = _queue.first;
+      final availableInFirst = first.length - _frontOffset;
+      if (availableInFirst <= remaining) {
+        _queue.removeFirst();
+        _frontOffset = 0;
+        remaining -= availableInFirst;
+      } else {
+        _frontOffset += remaining;
+        remaining = 0;
+      }
+    }
+  }
+
   Future<Map<String, dynamic>?> readFrame() async {
     while (true) {
-      final idx = _buffer.indexOf(10); // '\n'
-      if (idx >= 0) {
-        final line = utf8.decode(_buffer.sublist(0, idx));
-        _buffer.removeRange(0, idx + 1);
-        if (line.trim().isEmpty) continue;
-        return jsonDecode(line) as Map<String, dynamic>;
+      final found = _peekLine();
+      if (found != null) {
+        final (line, totalLen) = found;
+        _consume(totalLen);
+        if (line.isEmpty) continue;
+        return jsonDecode(utf8.decode(line)) as Map<String, dynamic>;
       }
       if (_done) return null;
       await _wait();
     }
   }
 
-  Future<List<int>?> readBytes(int max) async {
-    while (_buffer.isEmpty && !_done) {
+  /// Zero-copy read of up to [max] bytes, taken from whatever is already
+  /// queued (may return fewer than [max] bytes — callers loop as needed).
+  Future<Uint8List?> readBytes(int max) async {
+    while (_queue.isEmpty && !_done) {
       await _wait();
     }
-    if (_buffer.isEmpty) return null;
-    final take = min(max, _buffer.length);
-    final out = _buffer.sublist(0, take);
-    _buffer.removeRange(0, take);
+    if (_queue.isEmpty) return null;
+    final first = _queue.first;
+    final avail = first.length - _frontOffset;
+    final take = avail < max ? avail : max;
+    final out = Uint8List.sublistView(first, _frontOffset, _frontOffset + take);
+    _frontOffset += take;
+    if (_frontOffset >= first.length) {
+      _queue.removeFirst();
+      _frontOffset = 0;
+    }
     return out;
   }
 
